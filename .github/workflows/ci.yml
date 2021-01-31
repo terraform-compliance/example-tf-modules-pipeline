@@ -1,0 +1,101 @@
+name: CI
+on:
+  pull_request:
+    # Only run on tf file changes, in case you also use template files etc.
+    # you might want to add that as well. You might also add extra pipeline
+    # steps like if README.md files are generated correctly via terraform-docs
+    # etc. The example pipeline will only check for terraofmr-compliance right
+    # now.
+    paths:
+      - "**.tf"
+      - ".github/workflows/ci.yml"
+
+jobs:
+  # This job is purely to understand which directories are changed
+  changed:
+    runs-on: ubuntu-latest
+
+    outputs:
+      # We output the changed_dirs coming from the discovery step
+      # to the job. Hence any other job that "needs" this job can
+      # use this output
+      dirs: ${{ steps.discovery.outputs.changed_dirs }}
+
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          # We want to fetch ALL history, otherwise the git diff command
+          # will not work, since by default Github Actions clones only
+          # the latest commit without any history.
+          fetch-depth: 0
+      - name: discovery
+        id: discovery
+        # 1. Get the changed directories between current branch and master branch
+        # 2. Create json structure that github actions will understand
+        # Here is the json structure that is created from this commands ;
+        #
+        # {"include":[{"module":"no_rotation"},{"module":"pass"}]}
+        #
+        run: |
+          data=$(git diff --name-status master | awk '{print $2}' | cut -d "/" -f1 | sort | uniq | tr "\n" "|")
+          changed=jq -Rnc '(input | split("|") ) as $key | $key | del(.[] | select(. == "")) | [{module: .[]}] | {include: .}' <<<$data
+          echo "::set-output name=changed_dirs::$changed"
+  test:
+    runs-on: ubuntu-latest
+
+    # We use needs here not only for running discovery function earlier,
+    # but also to be able to reach their outputs
+    needs:
+      - changed
+
+    # This will create a separate job dynamically per each module
+    # hence it will all run in parallel.
+    strategy:
+      matrix: ${{ fromJson(needs.changed.outputs.dirs )}}
+      fail-fast: false
+      max-parallel: 5
+
+    # This will be translated to test_aws-kms-key
+    name: ${{ format('test_${0}', matrix.module) }}
+
+    defaults:
+      run:
+        # Changing to the module directory (e.g. aws-kms-key)
+        working-directory: ${{ matrix.module }}
+
+    # These are just read-only key for plan
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID_CI }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY_CI }}
+
+    steps:
+      - uses: actions/checkout@v2
+      - uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 0.14.x
+      - uses: terraform-compliance/github_action@main
+
+      # Check for formatting
+      - name: formatting check
+        run: terraform fmt --check
+
+      # Check for other tests
+      # ...
+
+      # Run tests
+      - name: terraform compliance tests
+        run: |
+          cd tests && ls -1 | while read test_dir;
+          do
+            echo "Testing $test_dir"
+            fail_flag=""
+            if [ -e .fail ]; then
+              echo "Expected to fail"
+              fail_flag="--wip"
+            fi
+
+            cd $test_dir && terraform init && terraform plan -out=plan.out \
+            && terraform show -json plan.out > plan.out.json \
+            && terraform-compliance -p plan.out.json -f https://github.com/terraform-compliance/user-friendly-features.git $fail_flag \
+            && cd ..
+          done
