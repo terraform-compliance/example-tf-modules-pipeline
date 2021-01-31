@@ -39,7 +39,7 @@ jobs:
         #
         run: |
           data=$(git diff --name-status master | awk '{print $2}' | cut -d "/" -f1 | sort | uniq | tr "\n" "|")
-          changed=jq -Rnc '(input | split("|") ) as $key | $key | del(.[] | select(. == "")) | [{module: .[]}] | {include: .}' <<<$data
+          changed=(jq -Rnc '(input | split("|") ) as $key | $key | del(.[] | select(. == "")) | [{module: .[]}] | {include: .}' <<<$data)
           echo "::set-output name=changed_dirs::$changed"
   test:
     runs-on: ubuntu-latest
